@@ -102,7 +102,7 @@ void AngleRecorderView::onDuration(lv_event_t* event)
     auto* self = static_cast<AngleRecorderView*>(lv_obj_get_user_data(button));
     const auto direction = static_cast<int32_t>(reinterpret_cast<intptr_t>(lv_event_get_user_data(event)));
     const int32_t duration = static_cast<int32_t>(self->_duration_ms) + direction * 10000;
-    self->_duration_ms = static_cast<uint32_t>(std::clamp(duration, 10000, 300000));
+    self->_duration_ms = static_cast<uint32_t>(std::clamp<int32_t>(duration, 10000, 300000));
     self->updateDuration();
 }
 
