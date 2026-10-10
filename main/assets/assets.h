@@ -22,6 +22,7 @@ LV_IMG_DECLARE(icon_fft);
 LV_IMG_DECLARE(icon_stopwatch);
 LV_IMG_DECLARE(icon_badge);
 LV_IMG_DECLARE(icon_lucky_wheel);
+LV_IMG_DECLARE(icon_angle_recorder);
 LV_IMG_DECLARE(icon_watch_face);
 
 LV_IMG_DECLARE(classic_hour_hand);

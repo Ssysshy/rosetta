@@ -217,6 +217,13 @@ public:
         float gyroY  = 0.0f;
         float gyroZ  = 0.0f;
     };
+    enum class ImuSampleResult { Ready, NotReady, Error };
+    struct ImuSample {
+        ImuData data;
+        uint64_t timestampUs = 0;
+    };
+    bool isImuReady() const;
+    ImuSampleResult readImuSample(ImuSample& sample);
     void updateImuData();
     const ImuData& getImuData() const
     {
