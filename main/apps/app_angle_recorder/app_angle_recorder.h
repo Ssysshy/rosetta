@@ -18,7 +18,7 @@ public:
     void onClose() override;
 
 private:
-    enum class CommandType { Start, Pause, Resume, Snapshot, Stop };
+    enum class CommandType { Start, Pause, Resume, Snapshot, Stop, Reset };
     struct Command {
         CommandType type;
         uint64_t timestampUs;

@@ -41,22 +41,39 @@ void AngleRecorderView::init(lv_obj_t* parent, bool sensorReady)
     lv_obj_set_style_bg_color(_root, lv_color_hex(background), 0);
     lv_obj_set_style_bg_opa(_root, LV_OPA_COVER, 0);
     lv_obj_remove_flag(_root, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_remove_flag(_root, LV_OBJ_FLAG_GESTURE_BUBBLE);
     lv_obj_add_event_cb(_root, onGesture, LV_EVENT_GESTURE, this);
-    _title = makeLabel(_root, "Angle Recorder", 240, 38);
+    _title = makeLabel(_root, "Angle Recorder", 340, 38);
     lv_obj_set_style_text_font(_title, &lv_font_montserrat_22, 0);
     _status = makeLabel(_root, sensorReady ? "Set recording time" : "IMU unavailable", 300, 70);
     _hint = makeLabel(_root, "A: start   Hold A+B: home", 330, 375);
     _duration_panel = lv_obj_create(_root);
     lv_obj_remove_style_all(_duration_panel);
-    lv_obj_set_size(_duration_panel, 360, 230);
-    lv_obj_align(_duration_panel, LV_ALIGN_CENTER, 0, 5);
+    lv_obj_set_size(_duration_panel, 360, 260);
+    lv_obj_align(_duration_panel, LV_ALIGN_TOP_MID, 0, 105);
     lv_obj_remove_flag(_duration_panel, LV_OBJ_FLAG_SCROLLABLE);
-    _duration_label = makeLabel(_duration_panel, "30 s", 220, 20);
+    for (size_t index = 0; index < _mode_buttons.size(); ++index) {
+        lv_obj_t* button = lv_button_create(_duration_panel);
+        _mode_buttons[index] = button;
+        lv_obj_set_size(button, 148, 44);
+        lv_obj_align(button, LV_ALIGN_TOP_MID, index == 0 ? -81 : 81, 0);
+        lv_obj_set_style_radius(button, 16, 0);
+        lv_obj_set_style_border_width(button, 2, 0);
+        lv_obj_set_user_data(button, this);
+        lv_obj_add_event_cb(button, onMode, LV_EVENT_CLICKED,
+                            reinterpret_cast<void*>(static_cast<intptr_t>(index)));
+        lv_obj_t* label = lv_label_create(button);
+        lv_label_set_text(label, index == 0 ? "Timed" : "Unlimited");
+        lv_obj_set_style_text_font(label, &lv_font_montserrat_16, 0);
+        lv_obj_center(label);
+    }
+    _duration_label = makeLabel(_duration_panel, "30 s", 260, 63);
     lv_obj_set_style_text_font(_duration_label, &lv_font_montserrat_36, 0);
     for (int direction : {-1, 1}) {
         lv_obj_t* button = lv_button_create(_duration_panel);
-        lv_obj_set_size(button, 100, 75);
-        lv_obj_align(button, LV_ALIGN_CENTER, direction * 85, 40);
+        _duration_buttons[direction < 0 ? 0 : 1] = button;
+        lv_obj_set_size(button, 100, 64);
+        lv_obj_align(button, LV_ALIGN_TOP_MID, direction * 85, 110);
         lv_obj_set_style_bg_color(button, lv_color_hex(0x29435F), 0);
         lv_obj_set_style_radius(button, 24, 0);
         lv_obj_set_user_data(button, this);
@@ -67,7 +84,18 @@ void AngleRecorderView::init(lv_obj_t* parent, bool sensorReady)
         lv_obj_center(label);
         lv_obj_set_style_text_font(label, &lv_font_montserrat_22, 0);
     }
-    makeLabel(_duration_panel, "10 - 300 seconds", 260, 195);
+    _duration_hint = makeLabel(_duration_panel, "10 - 300 seconds", 300, 190);
+    _start_button = lv_button_create(_duration_panel);
+    lv_obj_set_size(_start_button, 180, 64);
+    lv_obj_align(_start_button, LV_ALIGN_TOP_MID, 0, 110);
+    lv_obj_set_style_bg_color(_start_button, lv_color_hex(0x29435F), 0);
+    lv_obj_set_style_radius(_start_button, 24, 0);
+    lv_obj_add_event_cb(_start_button, onStart, LV_EVENT_CLICKED, this);
+    lv_obj_t* start_label = lv_label_create(_start_button);
+    lv_label_set_text(start_label, "Start");
+    lv_obj_set_style_text_font(start_label, &lv_font_montserrat_22, 0);
+    lv_obj_center(start_label);
+    updateDuration();
     for (size_t row = 0; row < _graphs.size(); ++row) {
         Graph& graph = _graphs[row];
         graph.owner = this;
@@ -86,7 +114,14 @@ void AngleRecorderView::init(lv_obj_t* parent, bool sensorReady)
 
 uint32_t AngleRecorderView::durationMs() const
 {
-    return _duration_ms;
+    return _unlimited ? 0 : _duration_ms;
+}
+
+bool AngleRecorderView::takeStartRequest()
+{
+    const bool requested = _start_requested;
+    _start_requested = false;
+    return requested;
 }
 
 int AngleRecorderView::takePageDelta()
@@ -108,7 +143,41 @@ void AngleRecorderView::onDuration(lv_event_t* event)
 
 void AngleRecorderView::updateDuration()
 {
-    lv_label_set_text_fmt(_duration_label, "%lu s", static_cast<unsigned long>(_duration_ms / 1000));
+    if (_unlimited) {
+        lv_label_set_text(_duration_label, "Unlimited");
+        lv_label_set_text(_duration_hint, "No automatic time limit");
+        lv_obj_remove_flag(_start_button, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_label_set_text_fmt(_duration_label, "%lu s", static_cast<unsigned long>(_duration_ms / 1000));
+        lv_label_set_text(_duration_hint, "10 - 300 seconds");
+        lv_obj_add_flag(_start_button, LV_OBJ_FLAG_HIDDEN);
+    }
+    for (lv_obj_t* button : _duration_buttons) {
+        if (_unlimited) {
+            lv_obj_add_flag(button, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_remove_flag(button, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+    for (size_t index = 0; index < _mode_buttons.size(); ++index) {
+        const bool selected = (index == 1) == _unlimited;
+        lv_obj_set_style_bg_color(_mode_buttons[index], lv_color_hex(selected ? 0x29435F : background), 0);
+        lv_obj_set_style_border_color(_mode_buttons[index], lv_color_hex(selected ? colors[1] : 0x344658), 0);
+    }
+}
+
+void AngleRecorderView::onMode(lv_event_t* event)
+{
+    lv_obj_t* button = lv_event_get_target_obj(event);
+    auto* self = static_cast<AngleRecorderView*>(lv_obj_get_user_data(button));
+    self->_unlimited = reinterpret_cast<intptr_t>(lv_event_get_user_data(event)) == 1;
+    self->updateDuration();
+}
+
+void AngleRecorderView::onStart(lv_event_t* event)
+{
+    auto* self = static_cast<AngleRecorderView*>(lv_event_get_user_data(event));
+    self->_start_requested = true;
 }
 
 void AngleRecorderView::onGesture(lv_event_t* event)
@@ -138,26 +207,49 @@ void AngleRecorderView::update(const model::angle::Status& status, const model::
                                size_t page, const char* message)
 {
     using model::angle::State;
+    using model::angle::Notice;
     const bool setup = status.state == State::Setup;
     const bool finished = status.state == State::Finished;
+    const bool sensor_error = setup && (status.notice == Notice::SensorUnavailable ||
+                                        status.notice == Notice::SensorError);
+    const char* title = "Angle Recorder";
+    uint32_t title_color = foreground;
+    if (status.state == State::Recording) {
+        title = "RECORDING";
+        title_color = colors[1];
+    } else if (status.state == State::Paused) {
+        title = "PAUSED";
+        title_color = colors[0];
+    } else if (finished) {
+        title = "RECORDING COMPLETE";
+        title_color = colors[2];
+    } else if (sensor_error) {
+        title = "SENSOR ERROR";
+        title_color = 0xFF7777;
+    }
+    lv_label_set_text(_title, title);
+    lv_obj_set_style_text_color(_title, lv_color_hex(title_color), 0);
     if (setup) {
         lv_obj_remove_flag(_duration_panel, LV_OBJ_FLAG_HIDDEN);
     } else {
         lv_obj_add_flag(_duration_panel, LV_OBJ_FLAG_HIDDEN);
+        _start_requested = false;
     }
     char text[128];
-    const char* state_name = "Set recording time";
-    if (status.state == State::Calibrating) {
-        state_name = "Calibrating: keep still";
-    } else if (status.state == State::Recording) {
+    const char* state_name = sensor_error ? "Check IMU and press A to retry" : "Select recording mode";
+    if (status.state == State::Recording) {
         state_name = "Recording";
     } else if (status.state == State::Paused) {
         state_name = "Paused";
     } else if (finished) {
         state_name = page == status.snapshotCount ? "Final result" : "Snapshot";
     }
-    if (setup || status.state == State::Calibrating) {
+    if (setup) {
         lv_label_set_text(_status, state_name);
+    } else if (status.durationMs == 0) {
+        std::snprintf(text, sizeof(text), "%s  %.1f s  (Unlimited)", state_name,
+                      static_cast<double>(stage.elapsedMs) / 1000.0);
+        lv_label_set_text(_status, text);
     } else {
         std::snprintf(text, sizeof(text), "%s  %.1f / %.0f s", state_name,
                       static_cast<double>(stage.elapsedMs) / 1000.0,
@@ -167,7 +259,7 @@ void AngleRecorderView::update(const model::angle::Status& status, const model::
     if (message != nullptr && message[0] != '\0') {
         lv_label_set_text(_hint, message);
     } else if (finished) {
-        std::snprintf(text, sizeof(text), "%u / %u  Swipe to browse%s\nHold A+B: home",
+        std::snprintf(text, sizeof(text), "%u / %u  Swipe left/right%s\nB: back   Hold A+B: home",
                       static_cast<unsigned>(page + 1), static_cast<unsigned>(status.snapshotCount + 1),
                       stage.degraded ? " *" : "");
         lv_label_set_text(_hint, text);
@@ -177,12 +269,10 @@ void AngleRecorderView::update(const model::angle::Status& status, const model::
         std::snprintf(text, sizeof(text), "A: pause   B: snapshot (%u/32)\nHold A+B: home",
                       static_cast<unsigned>(status.snapshotCount));
         lv_label_set_text(_hint, text);
-    } else if (status.state == State::Calibrating) {
-        lv_label_set_text(_hint, "Keep device still\nHold A+B: home");
     } else {
         lv_label_set_text(_hint, "A: start   Hold A+B: home");
     }
-    const bool show_graphs = !setup && status.state != State::Calibrating;
+    const bool show_graphs = !setup;
     for (size_t row = 0; row < _graphs.size(); ++row) {
         Graph& graph = _graphs[row];
         if (!show_graphs) {

@@ -6,10 +6,10 @@
 
 namespace model::angle {
 
-enum class State { Setup, Calibrating, Recording, Paused, Finished };
+enum class State { Setup, Recording, Paused, Finished };
 enum class Notice {
-    None, SensorUnavailable, KeepStill, Calibrating, MemoryFull, SnapshotFull, SnapshotSaved,
-    SamplingLost, SensorError, Singular, QueueFull, Ready
+    None, SensorUnavailable, MemoryFull, SnapshotFull, SnapshotSaved,
+    SamplingLost, SensorError, Singular, QueueFull
 };
 
 struct ImuReading {
@@ -55,6 +55,7 @@ public:
     AngleRecorder(const AngleRecorder&) = delete;
     AngleRecorder& operator=(const AngleRecorder&) = delete;
     bool begin(uint32_t durationMs, uint64_t nowUs);
+    void reset();
     void ingest(const ImuReading& reading);
     void tick(uint64_t nowUs);
     void samplingError(uint64_t nowUs);
@@ -75,12 +76,12 @@ private:
     void truncate(uint64_t eventUs);
     void append(uint64_t timestampUs, uint32_t timeMs);
     void markGap(uint64_t timestampUs);
-    void resetCalibration();
     void updateAngles();
-    bool allocate();
+    bool allocate(size_t capacity);
 
     Sample* _samples = nullptr;
     uint64_t* _timestamps = nullptr;
+    size_t _capacity = 0;
     size_t _sampleCount = 0;
     std::array<Stage, 32> _snapshots{};
     Stage _currentStage{};
@@ -95,7 +96,6 @@ private:
     uint64_t _firstGapUs = UINT64_MAX;
     uint64_t _lastStoredUs = 0;
     uint64_t _lastEventUs = 0;
-    uint64_t _calibrationStartUs = 0;
     uint64_t _finalEndUs = 0;
     uint64_t _finalSegmentAccumulatedUs = 0;
     uint64_t _lastSnapshotUs = 0;
@@ -104,10 +104,6 @@ private:
     bool _breakPending = false;
     bool _unwrapValid = false;
     bool _singular = false;
-    uint32_t _stableCount = 0;
-    std::array<float, 3> _accelSum{};
-    std::array<float, 3> _gyroSum{};
-    std::array<float, 3> _lastAccel{};
     std::array<float, 3> _angles{};
     std::array<float, 3> _rawPrevious{};
     uint8_t _validMask = 0;

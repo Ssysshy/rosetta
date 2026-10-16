@@ -31,7 +31,7 @@ bool normalize(Quaternion& q)
 }
 }  // namespace
 
-bool AttitudeEstimator::initialize(const std::array<float, 3>& gravity, const std::array<float, 3>& bias)
+bool AttitudeEstimator::initialize(const std::array<float, 3>& gravity)
 {
     const float norm = std::sqrt(gravity[0] * gravity[0] + gravity[1] * gravity[1] + gravity[2] * gravity[2]);
     if (!std::isfinite(norm) || norm < 1.0e-6F) {
@@ -44,7 +44,6 @@ bool AttitudeEstimator::initialize(const std::array<float, 3>& gravity, const st
     const float cp = std::cos(pitch * 0.5F);
     const float sp = std::sin(pitch * 0.5F);
     _orientation = {cr * cp, sr * cp, cr * sp, -sr * sp};
-    _bias = bias;
     return normalize(_orientation);
 }
 
@@ -59,7 +58,7 @@ bool AttitudeEstimator::update(const std::array<float, 3>& accel, const std::arr
         if (!std::isfinite(accel[axis]) || !std::isfinite(gyro[axis])) {
             return false;
         }
-        rate[axis] = (gyro[axis] - _bias[axis]) * (Pi / 180.0F);
+        rate[axis] = gyro[axis] * (Pi / 180.0F);
     }
     const float norm = std::sqrt(accel[0] * accel[0] + accel[1] * accel[1] + accel[2] * accel[2]);
     const Quaternion& q = _orientation;

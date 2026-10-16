@@ -2,6 +2,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <cstring>
+#include <limits>
 #include <new>
 #ifdef ESP_PLATFORM
 #include <esp_heap_caps.h>
@@ -10,7 +12,6 @@
 namespace model::angle {
 namespace {
 constexpr uint64_t SamplePeriodUs = 10000;
-constexpr uint64_t LostSamplingUs = 250000;
 constexpr uint64_t MaximumIntegrationUs = 100000;
 
 float magnitude(const std::array<float, 3>& values)
@@ -52,31 +53,40 @@ AngleRecorder::~AngleRecorder()
     std::free(_samples);
 }
 
-bool AngleRecorder::allocate()
+bool AngleRecorder::allocate(size_t capacity)
 {
-    if (_samples != nullptr) {
+    if (capacity <= _capacity) {
         return true;
     }
     constexpr size_t Alignment = alignof(uint64_t);
-    constexpr size_t Offset = (Capacity * sizeof(Sample) + Alignment - 1) / Alignment * Alignment;
-    constexpr size_t Bytes = Offset + Capacity * sizeof(uint64_t);
+    if (capacity > (std::numeric_limits<size_t>::max() - Alignment + 1) / (sizeof(Sample) + sizeof(uint64_t))) {
+        return false;
+    }
+    const size_t offset = (capacity * sizeof(Sample) + Alignment - 1) / Alignment * Alignment;
+    const size_t bytes = offset + capacity * sizeof(uint64_t);
+    const size_t old_offset = (_capacity * sizeof(Sample) + Alignment - 1) / Alignment * Alignment;
 #ifdef ESP_PLATFORM
-    void* memory = heap_caps_malloc(Bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    void* memory = heap_caps_realloc(_samples, bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (memory == nullptr) {
-        memory = heap_caps_malloc(Bytes, MALLOC_CAP_8BIT);
+        memory = heap_caps_realloc(_samples, bytes, MALLOC_CAP_8BIT);
     }
 #else
-    void* memory = std::malloc(Bytes);
+    void* memory = std::realloc(_samples, bytes);
 #endif
     if (memory == nullptr) {
         return false;
     }
     _samples = static_cast<Sample*>(memory);
-    _timestamps = reinterpret_cast<uint64_t*>(static_cast<unsigned char*>(memory) + Offset);
-    for (size_t index = 0; index < Capacity; ++index) {
+    _timestamps = reinterpret_cast<uint64_t*>(static_cast<unsigned char*>(memory) + offset);
+    if (_sampleCount > 0) {
+        std::memmove(_timestamps, static_cast<unsigned char*>(memory) + old_offset,
+                     _sampleCount * sizeof(uint64_t));
+    }
+    for (size_t index = _capacity; index < capacity; ++index) {
         new (_samples + index) Sample{};
         new (_timestamps + index) uint64_t{0};
     }
+    _capacity = capacity;
     return true;
 }
 
@@ -85,19 +95,19 @@ bool AngleRecorder::begin(uint32_t durationMs, uint64_t nowUs)
     if (_state != State::Setup) {
         return false;
     }
-    if (!allocate()) {
+    if (!allocate(Capacity)) {
         _notice = Notice::MemoryFull;
         return false;
     }
-    _durationMs = durationMs == 0 ? 30000 : std::clamp(durationMs, uint32_t{10000}, uint32_t{300000});
+    _durationMs = durationMs == 0 ? 0 : std::clamp(durationMs, uint32_t{10000}, uint32_t{300000});
     _sampleCount = 0;
     _snapshotCount = 0;
     _currentStage = {};
-    _state = State::Calibrating;
-    _notice = Notice::Calibrating;
+    _state = State::Recording;
+    _notice = Notice::None;
     _beginUs = nowUs;
     _lastReadingUs = nowUs;
-    _segmentStartUs = 0;
+    _segmentStartUs = nowUs;
     _accumulatedUs = 0;
     _firstGapUs = UINT64_MAX;
     _lastStoredUs = 0;
@@ -112,16 +122,27 @@ bool AngleRecorder::begin(uint32_t durationMs, uint64_t nowUs)
     _singular = false;
     _angles = {};
     _validMask = 0;
-    resetCalibration();
     return true;
 }
 
-void AngleRecorder::resetCalibration()
+void AngleRecorder::reset()
 {
-    _stableCount = 0;
-    _calibrationStartUs = 0;
-    _accelSum = {};
-    _gyroSum = {};
+    if (_state != State::Finished) {
+        return;
+    }
+    std::free(_samples);
+    _samples = nullptr;
+    _timestamps = nullptr;
+    _capacity = 0;
+    _sampleCount = 0;
+    _snapshotCount = 0;
+    _currentStage = {};
+    _accumulatedUs = 0;
+    _firstGapUs = UINT64_MAX;
+    _angles = {};
+    _validMask = 0;
+    _notice = Notice::None;
+    _state = State::Setup;
 }
 
 uint32_t AngleRecorder::elapsed(uint64_t nowUs) const
@@ -130,7 +151,8 @@ uint32_t AngleRecorder::elapsed(uint64_t nowUs) const
     if (_state == State::Recording && nowUs > _segmentStartUs) {
         value += nowUs - _segmentStartUs;
     }
-    return static_cast<uint32_t>(std::min(value / 1000, uint64_t{_durationMs}));
+    const uint32_t limit = _durationMs == 0 ? UINT32_MAX : _durationMs;
+    return static_cast<uint32_t>(std::min(value / 1000, uint64_t{limit}));
 }
 
 void AngleRecorder::markGap(uint64_t timestampUs)
@@ -170,7 +192,9 @@ void AngleRecorder::updateAngles()
 
 void AngleRecorder::append(uint64_t timestampUs, uint32_t timeMs)
 {
-    if (_sampleCount >= Capacity) {
+    if (_sampleCount >= _capacity &&
+        (_durationMs != 0 || _capacity > std::numeric_limits<size_t>::max() - Capacity ||
+         !allocate(_capacity + Capacity))) {
         stop(timestampUs);
         _notice = Notice::MemoryFull;
         return;
@@ -185,7 +209,7 @@ void AngleRecorder::append(uint64_t timestampUs, uint32_t timeMs)
 
 void AngleRecorder::ingest(const ImuReading& reading)
 {
-    if (_state != State::Calibrating && _state != State::Recording && _state != State::Paused) {
+    if (_state != State::Recording && _state != State::Paused) {
         return;
     }
     if (reading.timestampUs < _beginUs || (_hasReading && reading.timestampUs <= _lastReadingUs)) {
@@ -196,64 +220,30 @@ void AngleRecorder::ingest(const ImuReading& reading)
         return;
     }
     const uint64_t deltaUs = reading.timestampUs - _lastReadingUs;
-    if (_hasReading && deltaUs > MaximumIntegrationUs && _state != State::Calibrating) {
+    if (_hasReading && deltaUs > MaximumIntegrationUs) {
         markGap(_lastReadingUs);
         stop(std::max(_lastReadingUs, _lastEventUs));
         _notice = Notice::SamplingLost;
         return;
     }
-    if (_state == State::Recording &&
+    if (_state == State::Recording && _durationMs != 0 &&
         reading.timestampUs > _segmentStartUs + uint64_t{_durationMs} * 1000 - _accumulatedUs) {
         stop(_segmentStartUs + uint64_t{_durationMs} * 1000 - _accumulatedUs);
         return;
     }
-    if (_state == State::Calibrating) {
-        const float accelNorm = magnitude(reading.accel);
-        std::array<float, 3> change{};
-        for (size_t axis = 0; axis < 3; ++axis) {
-            change[axis] = reading.accel[axis] - _lastAccel[axis];
+    if (!_hasReading) {
+        if (!_estimator.initialize(reading.accel)) {
+            samplingError(reading.timestampUs);
+            return;
         }
-        const bool cadence = !_hasReading || (deltaUs >= 4000 && deltaUs <= 25000);
-        const bool stable = cadence && accelNorm >= 0.95F && accelNorm <= 1.05F &&
-                            magnitude(reading.gyro) <= 2.0F &&
-                            (_stableCount == 0 || magnitude(change) <= 0.03F);
-        if (!stable) {
-            resetCalibration();
-            _notice = Notice::KeepStill;
-        } else {
-            if (_stableCount == 0) {
-                _calibrationStartUs = reading.timestampUs;
-            }
-            ++_stableCount;
-            for (size_t axis = 0; axis < 3; ++axis) {
-                _accelSum[axis] += reading.accel[axis];
-                _gyroSum[axis] += reading.gyro[axis];
-            }
-            _notice = Notice::Calibrating;
-        }
-        _lastAccel = reading.accel;
+        _reference = _estimator.orientation();
         _lastReadingUs = reading.timestampUs;
         _hasReading = true;
-        if (_stableCount >= 100 && reading.timestampUs - _calibrationStartUs >= 990000) {
-            for (size_t axis = 0; axis < 3; ++axis) {
-                _accelSum[axis] /= static_cast<float>(_stableCount);
-                _gyroSum[axis] /= static_cast<float>(_stableCount);
-            }
-            if (!_estimator.initialize(_accelSum, _gyroSum)) {
-                resetCalibration();
-                _notice = Notice::SensorError;
-                return;
-            }
-            _reference = _estimator.orientation();
-            _state = State::Recording;
-            _notice = Notice::Ready;
-            _segmentStartUs = reading.timestampUs;
-            _lastEventUs = reading.timestampUs;
-            _firstGapUs = UINT64_MAX;
-            _breakPending = false;
-            updateAngles();
-            _angles = {};
-            append(reading.timestampUs, 0);
+        _notice = Notice::None;
+        updateAngles();
+        _angles = {};
+        if (_state == State::Recording) {
+            append(reading.timestampUs, elapsed(reading.timestampUs));
         }
         return;
     }
@@ -276,7 +266,7 @@ void AngleRecorder::ingest(const ImuReading& reading)
         }
         append(reading.timestampUs, elapsed(reading.timestampUs));
     }
-    if (_state == State::Recording && elapsed(reading.timestampUs) >= _durationMs) {
+    if (_state == State::Recording && _durationMs != 0 && elapsed(reading.timestampUs) >= _durationMs) {
         stop(reading.timestampUs);
     }
 }
@@ -286,20 +276,13 @@ void AngleRecorder::tick(uint64_t nowUs)
     if (_state == State::Setup || _state == State::Finished || nowUs < _lastReadingUs) {
         return;
     }
-    if ((_state == State::Calibrating && nowUs - _lastReadingUs >= LostSamplingUs) ||
-        (_state != State::Calibrating && nowUs - _lastReadingUs > MaximumIntegrationUs)) {
-        if (_state == State::Calibrating) {
-            resetCalibration();
-            _hasReading = false;
-            _notice = Notice::SensorUnavailable;
-        } else {
-            markGap(_lastReadingUs);
-            stop(std::max(_lastReadingUs, _lastEventUs));
-            _notice = Notice::SamplingLost;
-        }
+    if (nowUs - _lastReadingUs > MaximumIntegrationUs) {
+        markGap(_lastReadingUs);
+        stop(std::max(_lastReadingUs, _lastEventUs));
+        _notice = Notice::SamplingLost;
         return;
     }
-    if (_state == State::Recording && elapsed(nowUs) >= _durationMs) {
+    if (_state == State::Recording && _durationMs != 0 && elapsed(nowUs) >= _durationMs) {
         stop(_segmentStartUs + uint64_t{_durationMs} * 1000 - _accumulatedUs);
     }
 }
@@ -309,11 +292,7 @@ void AngleRecorder::samplingError(uint64_t nowUs)
     if (_state == State::Setup || _state == State::Finished) {
         return;
     }
-    if (_state == State::Calibrating) {
-        resetCalibration();
-    } else {
-        markGap(nowUs);
-    }
+    markGap(nowUs);
     _notice = Notice::SensorError;
     tick(nowUs);
 }
@@ -350,7 +329,7 @@ void AngleRecorder::pause(uint64_t eventUs)
     if (_state != State::Recording || eventUs < _lastEventUs) {
         return;
     }
-    if (elapsed(eventUs) >= _durationMs) {
+    if (_durationMs != 0 && elapsed(eventUs) >= _durationMs) {
         stop(eventUs);
         return;
     }
@@ -380,7 +359,7 @@ bool AngleRecorder::snapshot(uint64_t eventUs)
     if (!finishedSnapshot && (_state != State::Recording || eventUs < _lastEventUs)) {
         return false;
     }
-    if (_state == State::Recording && elapsed(eventUs) >= _durationMs) {
+    if (_state == State::Recording && _durationMs != 0 && elapsed(eventUs) >= _durationMs) {
         stop(_segmentStartUs + uint64_t{_durationMs} * 1000 - _accumulatedUs);
         if (eventUs > _finalEndUs) {
             return false;
@@ -393,7 +372,7 @@ bool AngleRecorder::snapshot(uint64_t eventUs)
     const uint32_t elapsedMs = _state == State::Finished
                                    ? static_cast<uint32_t>(std::min((_finalSegmentAccumulatedUs + eventUs -
                                                                    _segmentStartUs) / 1000,
-                                                                  uint64_t{_durationMs}))
+                                                                  uint64_t{_durationMs == 0 ? UINT32_MAX : _durationMs}))
                                    : elapsed(eventUs);
     _snapshots[_snapshotCount] = summarize(prefix(eventUs), elapsedMs, eventUs);
     _lastSnapshotUs = eventUs;
@@ -407,13 +386,13 @@ bool AngleRecorder::snapshot(uint64_t eventUs)
 
 void AngleRecorder::stop(uint64_t eventUs)
 {
-    if ((_state != State::Calibrating && _state != State::Recording && _state != State::Paused) ||
+    if ((_state != State::Recording && _state != State::Paused) ||
         eventUs < _lastEventUs) {
         return;
     }
     _finalWasRecording = _state == State::Recording;
     _finalSegmentAccumulatedUs = _accumulatedUs;
-    if (_finalWasRecording) {
+    if (_finalWasRecording && _durationMs != 0) {
         eventUs = std::min(eventUs, _segmentStartUs + uint64_t{_durationMs} * 1000 - _accumulatedUs);
     }
     _finalEndUs = eventUs;

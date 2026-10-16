@@ -18,7 +18,6 @@ const char* noticeText(Notice notice)
 {
     switch (notice) {
         case Notice::SensorUnavailable: return "IMU unavailable";
-        case Notice::KeepStill: return "Keep device still to calibrate";
         case Notice::MemoryFull: return "Insufficient recording memory";
         case Notice::SnapshotFull: return "Snapshot limit reached (32)";
         case Notice::SamplingLost: return "Sampling interrupted - record ended";
@@ -116,13 +115,15 @@ void AppAngleRecorder::onRunning()
     if (GetHAL().btnA.isReleased() && GetHAL().btnB.isReleased()) {
         _chord_active = false;
     }
-    if (!suppress_keys && GetHAL().btnA.wasClicked()) {
+    bool start_requested = false;
+    uint32_t duration = 30000;
+    {
+        LvglLockGuard lock;
+        start_requested = _view->takeStartRequest();
+        duration = _view->durationMs();
+    }
+    if (!suppress_keys && (GetHAL().btnA.wasClicked() || (start_requested && status.state == State::Setup))) {
         if (status.state == State::Setup) {
-            uint32_t duration = 30000;
-            {
-                LvglLockGuard lock;
-                duration = _view->durationMs();
-            }
             if (!GetHAL().isImuReady()) {
                 showMessage("IMU unavailable", now);
             } else {
@@ -148,14 +149,22 @@ void AppAngleRecorder::onRunning()
         }
     }
     if (_b_active && GetHAL().btnB.wasReleased()) {
-        if (!suppress_keys && !_b_long_handled && now_us - _b_pressed_us < 800000 &&
-            (status.state == State::Recording || status.state == State::Finished) && _b_press_state == State::Recording) {
-            sendCommand(CommandType::Snapshot, _b_pressed_us);
+        if (!suppress_keys && !_b_long_handled && now_us - _b_pressed_us < 800000) {
+            if ((status.state == State::Recording || status.state == State::Finished) &&
+                _b_press_state == State::Recording) {
+                sendCommand(CommandType::Snapshot, _b_pressed_us);
+            } else if (status.state == State::Finished && _b_press_state == State::Finished) {
+                sendCommand(CommandType::Reset, now_us);
+            }
         }
         _b_active = false;
     }
     if (status.state == State::Finished && _last_state != State::Finished) {
         _page = status.snapshotCount;
+    }
+    if (status.state == State::Setup && _last_state == State::Finished) {
+        _page = 0;
+        _message = nullptr;
     }
     if (status.snapshotCount > _last_snapshot_count) {
         if (status.state == State::Finished && _page == _last_snapshot_count) {
@@ -199,8 +208,7 @@ void AppAngleRecorder::onRunning()
         _view->prepare(stage, samples);
         xSemaphoreGive(_mutex);
     }
-    const char* message = status.state == State::Calibrating || status.state == State::Setup
-                              ? noticeText(status.notice) : nullptr;
+    const char* message = status.state == State::Setup ? noticeText(status.notice) : nullptr;
     if (_message != nullptr && (now - _message_tick < 1800 || _task == nullptr)) {
         message = _message;
     } else if (!GetHAL().isImuReady()) {
@@ -234,13 +242,14 @@ void AppAngleRecorder::worker()
                 case CommandType::Resume: _recorder->resume(command.timestampUs); break;
                 case CommandType::Snapshot: _recorder->snapshot(command.timestampUs); break;
                 case CommandType::Stop: _recorder->stop(command.timestampUs); break;
+                case CommandType::Reset: _recorder->reset(); break;
             }
             xSemaphoreGive(_mutex);
         }
         xSemaphoreTake(_mutex, portMAX_DELAY);
         const State state = _recorder->status(currentUs()).state;
         xSemaphoreGive(_mutex);
-        if (state == State::Calibrating || state == State::Recording || state == State::Paused) {
+        if (state == State::Recording || state == State::Paused) {
             Hal::ImuSample sample;
             const Hal::ImuSampleResult result = GetHAL().readImuSample(sample);
             xSemaphoreTake(_mutex, portMAX_DELAY);
